@@ -1,0 +1,384 @@
+							###--- Set Up Virtual Environment ---###
+wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
+
+bash Miniconda3-latest-Linux-x86_64.sh
+# Miniconda3 py313_25.3.1-1
+#lead to this /home/xikaka/miniconda3 environment 
+#after accepted the policy and enters agree to install 
+#no for auto activate base when log in 
+
+source ~/miniconda3/etc/profile.d/conda.sh
+conda --version
+#conda 25.3.1
+
+conda create -n funannotate_env -c bioconda -c conda-forge funannotate
+#create an environment called funannotate_env, from bioconda channel extract and download funannotate tool and use conda-forge to extract any other dependencies needed for funannotate to run in
+
+conda activate funannotate_env
+#to activate the environment 
+
+#conda deactivate
+#to end the environment 
+
+funannotate -help 
+#v.1.8.17
+
+funannotate setup -d /home/xikaka/funannotate_db
+#set up database necessary for funannotate to work 
+
+export FUNANNOTATE_DB=$PWD/funannotate_db
+#tell funannotate where to find this database
+
+Conda install -c bioconda funannotate
+conda install -c bioconda eggnog-mapper
+
+
+
+							###--- Funannotate Pipeline---###
+#Funannotate Annotation using T.inflatum GCA_003945565.1
+funannotate clean -i GCA_003945565.1_ASM394556v1_genomic.fna -o GCA_003945565.1_cleaned.fasta 
+#clean the headers first 
+#15 input contigs, 15 larger than 500 bp, N50 is 5,285,281 bp
+
+funannotate sort -i GCA_003945565.1_cleaned.fasta -b scaffold -o GCA_003945565.1_cleaned_sorted.fasta --minlen 0
+
+funannotate mask -i GCA_003945565.1_cleaned_sorted.fasta -o GCA_003945565.1_masked
+#num scaffolds: 15
+#assembly size: 31,717,789 bp
+#masked repeats: 4,307,899 bp (13.58%)
+
+#sbatch a job for more memory 
+nano run-funannotate.sh
+#!/bin/bash
+#SBATCH --job-name=funannotate
+#SBATCH --time=09:00:00
+#SBATCH --mem=128G
+#SBATCH --cpus-per-task=8
+#SBATCH --account=def-laidroog
+#SBATCH --output=funannotate.log
+
+# Load modules and activate environment
+module load python/3
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate funannotate_env
+
+# Run Funannotate
+funannotate predict -i GCA_003945565.1_mask -o GCA_003945565.1_predicted --species "Tolypocladium inflatum" --isolate "CBS 567.84"
+
+
+wget http://eggnogdb.embl.de/download/emapperdb-5.0.2/eggnog.db.gz #main annotation db for egg
+wget http://eggnogdb.embl.de/download/emapperdb-5.0.2/eggnog.taxa.tar.gz  #taxa db for egg
+wget http://eggnogdb.embl.de/download/emapperdb-5.0.2/eggnog_proteins.dmnd.gz #DIAMOND db for protein 
+#download the eggnog mapper database - only those of the fungi 
+
+emapper.py -i Tolypocladium_cylindrosporum_LO42.proteins.fa -o emapper_LO42 --data_dir ~/eggnog_db --target_orthologs one2one --override --cpu 8
+#create the protein coding genes annotation using eggnog mapper first; -e 0.001
+
+module load StdEnv/2023 interproscan/5.73-104.0
+interproscan.sh -i Tolypocladium_cylindrosporum_LO42.proteins.fa -f tsv -o LO42_interproscan_result.tsv -cpu 8
+
+
+sbatch run-funannotate.sh  #it runs in the background
+for i in *; do cd $"i"; echo -e "#query\ttaxon\tseed_eggNOG_ortholog\t..." > T.*_predicted/predicted_results/dummy.emapper.annotations; echo "Created dummy in $i"; done
+funannotate annotate -i T.cylindrosporum_CBS71870_predicted -o T.cylindrosporum_CBS71870_annotated --eggnog T.cylindrosporum_CBS71870_predicted/predict_results/dummy.emapper.annotations
+
+
+
+ 							###---BLASTp Pipeline---###
+module load blast 
+#blast/2.2.26
+2.14.1
+
+Candida albicans 
+makeblastdb -in protein.faa -dbtype prot -out Candida_albicans_db
+#blast 2.14.1
+#Adding sequences from FASTA; added 6030 sequences in 0.175844 seconds.
+
+blastp -query /home/xikaka/scratch/research/combinedv2.fasta -db /home/xikaka/scratch/research/Candida_albicans_GCF_000182965.3/data/GCF_000182965.3/Candida_albicans_db -evalue 1e-5 -outfmt 6 -num_threads 8 -out Candida_albicans_blastpresultv2
+
+cat Candida_albicans_blastpresultv2
+#confirmed all the genes of interest listed for C.albicans are in the result file 
+Hwp1, Als3, SAP1-7, Phr1,2, PLB1,3, TEC1, EFG1
+
+
+
+						###---18SITS5.8SSequence extraction pipelines---###
+barrnap --kingdom euk T.cylindrosporum_LO42_cleaned_sorted.fasta > LO42_rrna_annotation.gff3
+tRNAscan-SE T.cylindrosporum_LO42_cleaned_sorted.fasta --output-gff LO42_trna.gff3
+samtoold faidx T.cylindrosporum_LO42_cleaned_sorted.fasta scaffold_282:4833-6625
+#extract 18S-5.8S sequence for phylogenetic tree
+seqtk seq -u -r lowercase18S.fasta
+#for sequences with lower case base pairs turn into upper + reverse the sequence for complementary seq
+
+module load StdEnv/2020 trimal
+#trimal/1.4
+trimal -in 18SITS58S_aligned.fasta -out 18SITS58S_aligned_trimmed.fasta -gt 0.8
+
+module load seqkit 
+#seqkit/2.3.1
+seqkit stats 18SITS58S_aligned_trimmed.fasta 
+file                             format  type  num_seqs  sum_len  min_len  avg_len  max_len
+18SITS58S_aligned_trimmed.fasta  FASTA   DNA         28   56,084    2,003    2,003    2,003
+
+
+
+
+					###---ITS Sequence Extraction Pipelines---###
+conda install -c bioconda ITSx 
+#for finding ITS sequence from the genome 
+#according to barrnap given sequence region between 18S to 28S feed into ITSx tool 
+samtools faidx ../../T.cylindrosporum_LO42_cleaned_sorted.fasta scaffold_282:178-6625 > full.fasta
+ITSx -i full.fasta -o itsx_output --preserve T
+#then manually paste the ITS1 and ITS2 in the corresponding files 
+#at the mean time, blast to confirm matches is ITS sequences 
+
+
+
+
+
+					###---TUB1 Gene Sequence Extraction Pipeline---###	
+#look at LO42 annotated.gff3 
+grep -i "TUB1" T.cylindrosporum_LO42_annotated.gff3
+Samtools faidx Tolypocladium cylindrosporum_LO42_cleaned_sorted.fasta scaffold_4:219108-223007 > TUB1_LO42.fasta
+#paste into a fasta file manually 
+
+
+module load fastqc
+# v.0.12.1
+					## Original Fastq file check 
+fastqc LO42_S128_L001_R1_001.fastq LO42_S128_L001_R2_001.fastq -o ./Analysis
+#R1 = forward read 
+
+#R1 57% GC content, sequence length 35 - 151 bp, total seq 12,494,642
+#tile 2304 quality has failed shown in red (1-3bp) 
+#and 7 other tiles shown in green near 130-144bp 
+#the first 10-13bp has shown imbalance in GC content 
+#adapter removed 
+
+#R2 = backward read
+
+#R2 57% GC content, sequence length similar, same total seq 
+#first 10-13 bp also shown imbalance in GC content 
+#there are 25186 counts of poly-G sequence that is not biological seq 
+
+#remove first 10-13bp for both R1 and R2, remove poly-G sequence in R2  
+
+
+					## Remove polyG sequence
+module load fastp 
+#fastp/0.24.0
+fastp -i LO42_S128_L001_R1_001.fastq -I LO42_S128_L001_R2_001.fastq -o LO42_S128_L001_R1_nopolyG.fastq -O LO42_S128_L001_R2_nopolyG.fastq --trim_poly_g
+
+Read1 before filtering:
+total reads: 12494642
+total bases: 1548035380
+Q20 bases: 1526111079(98.5837%)
+Q30 bases: 1467856099(94.8206%)
+
+Read2 before filtering:
+total reads: 12494642
+total bases: 1548403936
+Q20 bases: 1518432200(98.0643%)
+Q30 bases: 1448473285(93.5462%)
+
+Read1 after filtering:
+total reads: 12317962
+total bases: 1526037164
+Q20 bases: 1508848447(98.8736%)
+Q30 bases: 1455773075(95.3957%)
+
+Read2 after filtering:
+total reads: 12317962
+total bases: 1522974198
+Q20 bases: 1502214730(98.6369%)
+Q30 bases: 1440379960(94.5768%)
+
+Filtering result:
+reads passed filter: 24635924
+reads failed due to low quality: 231566
+reads failed due to too many N: 74790
+reads failed due to too short: 47004
+reads with adapter trimmed: 362656
+bases trimmed due to adapters: 4723844
+
+Duplication rate: 7.4949%
+
+Insert size peak (evaluated by paired-end reads): 105
+
+					## Check remove of polyG sequences 
+module load fastqc 
+#fastqc/0.12.1 
+fastqc LO42_S128_L001_R1_nopolyG.fastq LO42_S128_L001_R2_nopolyG.fastq -o analyze
+
+#successfully removed polyG sequence and improved quality of the sequences 
+	
+					## Generate Pair End files 
+module load trimmomatic 
+#trimmomatic/0.39  
+
+java -jar $EBROOTTRIMMOMATIC/trimmomatic-0.39.jar PE LO42_S128_L001_R1_nopolyG.fastq LO42_S128_L001_R2_nopolyG.fastq LO42_R1_PE.fastq LO42_R1_SE.fastq LO42_R2_PE.fastq LO42_R2_SE.fastq SLIDINGWINDOW:4:20 MINLEN:50
+
+#Input Read Pairs: 12317962 Both Surviving: 11177056 (90.74%) Forward Only Surviving: 296531 (2.41%) Reverse Only Surviving: 113252 (0.92%) Dropped: 731123 (5.94%)
+
+		## Check Quality After Filtering 
+fastqc LO42_R1_PE.fastq LO42_R2_PE.fastq -o analyze/
+
+#R1_PE total sequence: 11177056, total bases: 1.4Gbp, sequence length: 50-151 
+#R2_PE same output as R1 except it provides good tile quality while R1 still shows 1 red tile quality 
+
+nano runspades.sh 
+#!/bin/bash
+#SBATCH --job-name=funannotate
+#SBATCH --time=02:00:00
+#SBATCH --mem=550G
+#SBATCH --cpus-per-task=8
+#SBATCH --account=def-laidroog
+#SBATCH --output=runspades.log
+
+spades.py -1 LO42_R1_PE.fastq  -2 LO42_R2_PE.fastq  -o LO42_assembly --careful
+
+
+
+					## Assembly Quality Check 
+module	 load quast 
+#StdEnv/2020 
+#gcc/9.3.0 
+#quast/5.2.0
+
+quast -o ../analyze/Quast contigs.fasta
+
+#contigs, N50 = 229237, L50 = 37, auN = 300174.2, Total length = 31220495, GC % = 57.79, # N's per 100 kbp =  0.00
+
+module load StdEnv/2023
+module load bwa 
+#bwa/0.7.18
+
+samtools faidx ../LO42_assembly/contigs.fasta 
+#samtools/1.20 
+
+bwa index contigs.fasta
+bwa mem LO42_assembly/contigs.fasta LO42_R1_PE.fastq LO42_R2_PE.fastq > paired_map.sam
+#mapping the paired end files back to the contig file 
+
+samtools sort paired_map.sam > paired_map_sorted.sam
+samtools flagstats paired_map_sorted.sam
+22368416 + 0 in total (QC-passed reads + QC-failed reads)
+22354112 + 0 primary
+0 + 0 secondary
+14304 + 0 supplementary
+0 + 0 duplicates
+0 + 0 primary duplicates
+22366421 + 0 mapped (99.99% : N/A)
+22352117 + 0 primary mapped (99.99% : N/A)
+22354112 + 0 paired in sequencing
+11177056 + 0 read1
+11177056 + 0 read2
+22012014 + 0 properly paired (98.47% : N/A)
+22351934 + 0 with itself and mate mapped
+183 + 0 singletons (0.00% : N/A)
+271424 + 0 with mate mapped to a different chr
+253280 + 0 with mate mapped to a different chr (mapQ>=5)
+
+
+
+
+						## LO42 - Annotation 
+funannotate clean -i contigs.fasta -o T.cylindrosporum_LO42_cleaned.fasta
+#N50: 199,052bp, 1397/7662 are larger than 500bp, Funannotate removes contigs that only have 2 or 3 nucleotides 
+
+quast T.cylindrosporum_LO42_cleaned.fasta
+#N50 = 229237, L50 = 37, auN = 300174.2, Total length = 31220495, GC % = 57.79, # N's per 100 kbp =  0.00
+
+funannotate sort -i T.cylindrosporum_LO42_cleaned.fasta -o T.cylindrosporum_LO42_cleaned_sorted.fasta -b scaffold --minlen 0
+
+funannotate mask -i T.cylindrosporum_LO42_cleaned_sorted.fasta -o T.cylindrosporum_LO42_masked.fasta
+#31,220,495bp size, 1,477,911bp (4.73% repeats) 
+#suggesting fewer transposable elements 
+
+funannotate predict -i T.cylindrosporum_LO42_masked.fasta -o T.cylindrosporum_LO42_predicted --species "Tolypocladium cylindrosporum" --isolate "LO42" 
+
+grep '^>' T.cylindrosporum_LO42_cleaned.fasta | awk -F'[_ ]' '{if ($6 < 10) count++} END {print count}'
+# 53 contigs have coverage < 10, since only 53/1397 contigs I decided not to filter them as they may hold important pathogenic genes 
+
+  Feature       Specificity   Sensitivity
+  nucleotides   95.0%         95.4%      
+  exons         86.7%         78.4%      
+  genes         71.9%         58.6% 
+
+  Source         Weight   Count
+  Augustus       1        8352 
+  Augustus HiQ   2        78   
+  GlimmerHMM     1        9859 
+  snap           1        9925 
+  Total          -        28214
+
+ Found 95 gene models to remove: 2 too short; 0 span gaps; 93 transposable elements
+9,436 gene models remaining
+
+
+
+					###--- Annotation on rRNA and tRNAs----###
+barrnap --kingdom euk T.cylindrosporum_LO42_cleaned_sorted.fasta > LO42_rrna_annotation.gff3
+tRNAscan-SE T.cylindrosporum_LO42_cleaned_sorted.fasta --output-gff LO42_trna.gff3
+samtoold faidx T.cylindrosporum_LO42_cleaned_sorted.fasta scaffold_282:4833-6625
+#extract 18S-5.8S sequence for phylogenetic tree
+seqtk seq -u -r lowercase18S.fasta
+#for sequences with lower case base pairs turn into upper + reverse the sequence for complementary seq
+
+
+					###--- Annotations of Protein Coding Genes---###
+emapper.py -i Tolypocladium_cylindrosporum_LO42.proteins.fa -o emapper_LO42 --data_dir ~/eggnog_db --target_orthologs one2one --resume --cpu 8
+#annotated protein coding genes, using the .protein.fa file 
+
+module load StdEnv/2023 interproscan/5.73-104.0
+interproscan.sh -i Tolypocladium_cylindrosporum_LO42.proteins.fa -f tsv -o LO42_interproscan_result.tsv --goterms -cpu 8
+
+funannotate annotate -i T.cylindrosporum_LO42_predicted -o T.cylindrosporum_LO42_annotated --iprscan T.cylindrosporum_LO42_predicted/predict_results/LO42_interproscan_result.xml --eggnog T.cylindrosporum_LO42_predicted/predict_results/emapper_LO42.emapper.annotations --cpus 8
+					
+
+
+
+
+				###---Remap Original File to Assembled Fasta---###
+Module load blast 
+#blast/2.2.26
+
+makeblastdb -in Tolypocladium_cylindrosporum_LO42.proteins.fa -dbtype prot -out T.cylindrosporum_LO42_db
+
+blastp -query /home/xikaka/scratch/research/combinedv2.fasta -db T.cylindrosporum_LO42_db -evalue 1e-5 -outfmt 6 -num_threads 8 -out T.cylindrosporum_LO42_blastpresultv2
+
+
+#compare contigs information with other strains 
+quast GCA_023972975.1_cleaned.fasta
+#IBT41711
+#GCA_023972975.1_cleaned, N50 = 30235, L50 = 323, auN = 35359.2, Total length = 32018899, GC % = 57.89, # N's per 100 kbp =  28.71
+
+quast GCA_024340765.1_cleaned.fasta
+#CBS718.70
+
+
+Module load blast 
+blast+/2.14.1
+#downloaded T.tropicale CBS136897'd ITS regions from NCBI
+makeblastdb -dbtype nucl -in T.tropicale_CBS136897_ITS.fasta -out T.tropicale_CBS136897_db
+blastn -query T.tropicale_MX337_cleaned_sorted.fasta -db T.tropicale_CBS136897_db -out T.tropicale_MXfindITS.txt -outfmt 6
+#result suggested scaffold 373 is closely matched 
+Samtools faidx T.tropicale_MX337_cleaned_sorted.fasta scaffold_373 | seqtk seq -U > try.fasta
+#samtools/1.20
+ITSx -i try.fasta -o try_ITSout 
+#V1.1.3
+#none ITS1 region found by ITSx when tried various contigs that are acceptable length for ITSx tool  
+
+Module load trimal 
+#trimal/1.4
+trimal -in ITS1_aligned.fasta -out ITS1_aligned_trimmed.fasta -gt 0.8
+trimal -in ITS2_aligned.fasta -out ITS2_aligned_trimmed.fasta -gt 0.8
+trimal -in 28S_aligned.fasta -out 28S_aligned_trimmed.fasta -gt 0.8
+
+
+
+git clone https://github.com/marekborowiec/AMAS.git
+cd AMAS/amas
+python3 setup.py install
+python AMAS.py concat -i ~/scratch/research/28S_aligned_trimmed.fasta  ~/scratch/research/ITS1_aligned_trimmed.fasta ~/scratch/research/TUB1_aligned_trimmed.fasta ~/scratch/research/ITS2_aligned_trimmed.fasta -f fasta -d dna -u fasta -t concatenated_28SITS12TUB1_out.fasta
+
